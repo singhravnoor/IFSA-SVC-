@@ -9,7 +9,7 @@ import collections # For deque, a more efficient queue for FIFO
 from streamlit_autorefresh import st_autorefresh
 
 # --- Configuration ---
-st.set_page_config(layout="wide", page_title="📈 Rupee Portfolio Tracker")
+st.set_page_config(layout="wide", page_title="Portfolio Tracker")
 
 # --- Automatic Refresh Setup ---
 # Rerun the app every 60 seconds (60000 milliseconds)
@@ -17,7 +17,7 @@ st.set_page_config(layout="wide", page_title="📈 Rupee Portfolio Tracker")
 # IMPORTANT: Be mindful of yfinance rate limits if running for long periods.
 st_autorefresh(interval=60000, key="data_autorefresh")
 
-# --- Helper Functions ---
+# --- Helper Functions (Cached) ---
 
 # Removed @st.cache_data from get_live_prices so it always fetches fresh data on app rerun
 def get_live_prices(tickers):
@@ -40,10 +40,10 @@ def get_live_prices(tickers):
             if price is not None:
                 live_prices_dict[ticker_symbol] = price
             else:
-                st.warning(f"Could not fetch live price for {ticker_symbol}. Using 0 for now.")
+                st.info(f"Could not fetch live price for {ticker_symbol}. Using 0 for now.") 
                 live_prices_dict[ticker_symbol] = 0 # Fallback
         except Exception as e:
-            st.warning(f"Error fetching live price for {ticker_symbol}: {e}. Using 0 for now.")
+            st.info(f"Error fetching live price for {ticker_symbol}: {e}. Using 0 for now.") 
             live_prices_dict[ticker_symbol] = 0 # Fallback
     return live_prices_dict
 
@@ -84,7 +84,7 @@ def validate_indian_stock_symbol(symbol):
     symbol_ns = f"{symbol}.NS"
     try:
         ticker = yf.Ticker(symbol_ns)
-        if ticker.info and ticker.info.get('exchange') in ['NSE', 'NSI']:
+        if ticker.info and ticker.info.get('regularMarketPrice') and ticker.info.get('exchange') in ['NSE', 'NSI']:
             return symbol_ns, None
     except:
         pass
@@ -93,7 +93,7 @@ def validate_indian_stock_symbol(symbol):
     symbol_bo = f"{symbol}.BO"
     try:
         ticker = yf.Ticker(symbol_bo)
-        if ticker.info and ticker.info.get('exchange') in ['BSE', 'BOM']:
+        if ticker.info and ticker.info.get('regularMarketPrice') and ticker.info.get('exchange') in ['BSE', 'BOM']:
             return symbol_bo, None
     except:
         pass
@@ -232,7 +232,7 @@ if st.sidebar.button("Add Transaction"):
             
             if quantity > held_qty:
                 st.sidebar.warning(f"You only hold {held_qty} shares of {normalized_stock_symbol}. Cannot sell {quantity}.")
-                st.stop()
+                st.stop() # Stop execution to prevent adding invalid transaction
 
         new_transaction = pd.DataFrame({
             "Date": [input_date],
@@ -248,18 +248,16 @@ if st.sidebar.button("Add Transaction"):
         )
         st.sidebar.success(f"Added {action} of {quantity} {normalized_stock_symbol} at ₹{price:,.2f}")
         
-        # Clear specific caches that depend on transactions (live prices, historical data, symbol validation)
-        # We don't clear get_live_prices here because it's no longer cached
+        # Clear specific caches that depend on transactions (historical data, symbol validation)
         get_historical_prices.clear()
         validate_indian_stock_symbol.clear()
         st.rerun()
 
 # --- Sidebar: Refresh and Clear options ---
 st.sidebar.markdown("---")
-# This button still clears the cache for get_live_prices if it was cached.
-# Since it's not cached now, this button primarily acts as a manual rerun.
+# This button still triggers a full rerun, which will fetch new live prices
 if st.sidebar.button("Refresh Live Prices Now", type="primary"): 
-    st.sidebar.success("Live prices refreshed!") # No cache clear needed for get_live_prices
+    st.sidebar.success("Live prices refreshed!") 
     st.rerun()
 
 st.sidebar.markdown("---")
@@ -267,223 +265,231 @@ if st.sidebar.button("Clear All Transactions", type="secondary"):
     st.session_state.transactions = pd.DataFrame(
         columns=["Date", "Stock", "Action", "Quantity", "Price"]
     )
-    st.session_state.transactions["Date"] = pd.to_datetime(st.session_state.transactions["Date"]) 
+    st.session_state.transactions["Date"] = pd.to_datetime(st.session_state.transactions["Date"]) # Ensure type consistency
     st.sidebar.success("All transactions cleared.")
     # Clear all caches, including historical data and symbol validation
     get_historical_prices.clear()
     validate_indian_stock_symbol.clear()
     st.rerun()
 
-# --- Main Dashboard ---
-st.title("📊 Rupee Portfolio Tracker")
+# --- Main Dashboard Title ---
+st.title("Portfolio Tracker")
 
-# 1. Display and Edit Transactions
-st.subheader("Your Transactions (Edit/Delete Directly)")
-if not st.session_state.transactions.empty:
-    editable_transactions_df = st.session_state.transactions.sort_values(by="Date", ascending=False).reset_index(drop=True)
-    
-    edited_df = st.data_editor(
-        editable_transactions_df, 
-        use_container_width=True,
-        num_rows="dynamic", 
-        column_config={
-            "Date": st.column_config.DateColumn(format="YYYY-MM-DD"), 
-            "Quantity": st.column_config.NumberColumn(format="%d"),
-            "Price": st.column_config.NumberColumn(format="₹%,.2f")
-        },
-        key="transactions_data_editor" 
-    )
+# --- Tabs for content organization ---
+tab1, tab2 = st.tabs(["Dashboard", "Transactions"])
 
-    if not edited_df.equals(editable_transactions_df):
-        try:
-            edited_df["Date"] = pd.to_datetime(edited_df["Date"])
-
-            for index, row in edited_df.iterrows():
-                symbol_check, symbol_error = validate_indian_stock_symbol(row["Stock"])
-                if symbol_error:
-                    st.error(f"Error in row {index+1}: {symbol_error}. Please correct the stock symbol.")
-                    st.stop() 
-                edited_df.loc[index, "Stock"] = symbol_check 
-
-                if row["Quantity"] < 1:
-                    st.error(f"Error in row {index+1}: Quantity must be at least 1.")
-                    st.stop()
-                if row["Price"] < 0.01:
-                    st.error(f"Error in row {index+1}: Price must be at least ₹0.01.")
-                    st.stop()
-
-            st.session_state.transactions = edited_df
-            st.success("Transactions updated successfully!")
-            # Clear caches that depend on transaction data
-            get_historical_prices.clear()
-            validate_indian_stock_symbol.clear()
-            st.rerun() 
-        except Exception as e:
-            st.error(f"Error updating transactions: {e}. Please ensure 'Date' is in YYYY-MM-DD format, Quantity is a number, and Price is a number.")
-else:
-    st.info("No transactions added yet. Use the sidebar to input trades.")
-
-# --- Realized P&L and Portfolio Calculations ---
-if not st.session_state.transactions.empty:
-    
-    total_realized_pnl, realized_pnl_history_df = calculate_realized_pnl(st.session_state.transactions.copy())
-
-    st.subheader("💰 Realized Profit/Loss")
-    st.metric(
-        "Total Realized P&L",
-        f"₹{total_realized_pnl:,.2f}",
-        delta_color="normal" 
-    )
-
-
-    holdings_list = calculate_current_holdings(st.session_state.transactions.copy())
-    holdings_df = pd.DataFrame(holdings_list)
-
-    if not holdings_df.empty:
-        st.subheader("📈 Live Portfolio Performance (Unrealized)")
+with tab1: # Content for the "Dashboard" tab
+    if not st.session_state.transactions.empty:
         
-        unique_held_stocks = holdings_df["Stock"].tolist()
-        live_prices = get_live_prices(unique_held_stocks) # This will now always fetch live data
-        
-        holdings_df["Current Price"] = holdings_df["Stock"].map(live_prices)
+        # Calculate Realized P&L first using the dedicated function
+        total_realized_pnl, realized_pnl_history_df = calculate_realized_pnl(st.session_state.transactions.copy())
 
-        holdings_df["Current Price"] = holdings_df["Current Price"].fillna(holdings_df["Avg Buy Price"])
-        holdings_df["Current Price"] = holdings_df["Current Price"].fillna(0) 
-
-        holdings_df["Investment"] = holdings_df["Quantity"] * holdings_df["Avg Buy Price"]
-        holdings_df["Current Value"] = holdings_df["Quantity"] * holdings_df["Current Price"]
-        holdings_df["Unrealized P&L (₹)"] = holdings_df["Current Value"] - holdings_df["Investment"]
-        
-        holdings_df["Unrealized P&L (%)"] = holdings_df.apply(
-            lambda row: (row["Unrealized P&L (₹)"] / row["Investment"]) * 100 if row["Investment"] != 0 else 0,
-            axis=1
+        st.subheader("Realized Profit/Loss")
+        st.metric(
+            "Total Realized P&L",
+            f"₹{total_realized_pnl:,.2f}",
+            delta_color="normal" 
         )
 
-        st.dataframe(
-            holdings_df.style.format({
-                "Avg Buy Price": "₹{:,.2f}",
-                "Current Price": "₹{:,.2f}",
-                "Investment": "₹{:,.2f}",
-                "Current Value": "₹{:,.2f}",
-                "Unrealized P&L (₹)": "₹{:,.2f}",
-                "Unrealized P&L (%)": "{:,.2f}%"
-            }),
-            use_container_width=True
-        )
+        # Get current holdings using the new helper function
+        holdings_list = calculate_current_holdings(st.session_state.transactions.copy())
+        holdings_df = pd.DataFrame(holdings_list)
 
-        total_current_value = holdings_df["Current Value"].sum()
-        total_investment = holdings_df["Investment"].sum()
-        total_unrealized_pnl_dollars = holdings_df["Unrealized P&L (₹)"].sum()
-        total_unrealized_pnl_percent = (total_unrealized_pnl_dollars / total_investment) * 100 if total_investment != 0 else 0
+        if not holdings_df.empty:
+            # FIX: Make index start from 1
+            holdings_df.index = holdings_df.index + 1
+            
+            st.subheader("Live Portfolio Performance (Unrealized)")
+            
+            unique_held_stocks = holdings_df["Stock"].tolist()
+            live_prices = get_live_prices(unique_held_stocks) 
+            
+            holdings_df["Current Price"] = holdings_df["Stock"].map(live_prices)
 
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            st.metric("Total Current Value", f"₹{total_current_value:,.2f}")
-        with col2:
-            st.metric("Total Investment (Held)", f"₹{total_investment:,.2f}")
-        with col3:
-            st.metric(
-                "Total Unrealized P&L",
-                f"₹{total_unrealized_pnl_dollars:,.2f}",
-                delta=f"{total_unrealized_pnl_percent:,.2f}%"
+            holdings_df["Current Price"] = holdings_df["Current Price"].fillna(holdings_df["Avg Buy Price"])
+            holdings_df["Current Price"] = holdings_df["Current Price"].fillna(0) 
+
+            holdings_df["Investment"] = holdings_df["Quantity"] * holdings_df["Avg Buy Price"]
+            holdings_df["Current Value"] = holdings_df["Quantity"] * holdings_df["Current Price"]
+            holdings_df["Unrealized P&L (₹)"] = holdings_df["Current Value"] - holdings_df["Investment"]
+            
+            holdings_df["Unrealized P&L (%)"] = holdings_df.apply(
+                lambda row: (row["Unrealized P&L (₹)"] / row["Investment"]) * 100 if row["Investment"] != 0 else 0,
+                axis=1
             )
 
-        st.subheader("📊 Portfolio Growth Over Time (Unrealized)")
-        
-        min_transaction_date = st.session_state.transactions["Date"].min()
-        max_today = datetime.now()
-        
-        all_traded_stocks = st.session_state.transactions["Stock"].unique().tolist()
-        all_historical_prices = get_historical_prices(
-            all_traded_stocks, 
-            min_transaction_date.strftime("%Y-%m-%d"), 
-            (max_today + timedelta(days=1)).strftime("%Y-%m-%d")
-        )
-        all_historical_prices.index = all_historical_prices.index.date 
+            st.dataframe(
+                holdings_df.style.format({
+                    "Avg Buy Price": "₹{:,.2f}",
+                    "Current Price": "₹{:,.2f}",
+                    "Investment": "₹{:,.2f}",
+                    "Current Value": "₹{:,.2f}",
+                    "Unrealized P&L (₹)": "₹{:,.2f}",
+                    "Unrealized P&L (%)": "{:,.2f}%"
+                }),
+                use_container_width=True
+            )
 
-        portfolio_history_data = []
-        
-        current_holdings_state_for_history = collections.defaultdict(lambda: {"quantity": 0, "total_cost": 0})
+            total_current_value = holdings_df["Current Value"].sum()
+            total_investment = holdings_df["Investment"].sum()
+            total_unrealized_pnl_dollars = holdings_df["Unrealized P&L (₹)"].sum()
+            total_unrealized_pnl_percent = (total_unrealized_pnl_dollars / total_investment) * 100 if total_investment != 0 else 0
 
-        all_relevant_dates = sorted(list(set(
-            [t.date() for t in st.session_state.transactions["Date"]] + 
-            pd.date_range(start=min_transaction_date, end=max_today, freq='D').date.tolist()
-        )))
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Total Current Value", f"₹{total_current_value:,.2f}")
+            with col2:
+                st.metric("Total Investment (Held)", f"₹{total_investment:,.2f}")
+            with col3:
+                st.metric(
+                    "Total Unrealized P&L",
+                    f"₹{total_unrealized_pnl_dollars:,.2f}",
+                    delta=f"{total_unrealized_pnl_percent:,.2f}%"
+                )
 
-        transaction_idx_for_history = 0
-        for current_day in all_relevant_dates:
-            while transaction_idx_for_history < len(st.session_state.transactions) and \
-                  st.session_state.transactions.iloc[transaction_idx_for_history]["Date"].date() <= current_day:
-                
-                txn = st.session_state.transactions.iloc[transaction_idx_for_history]
-                stock = txn["Stock"]
-                action = txn["Action"]
-                quantity = txn["Quantity"]
-                price = txn["Price"]
+            st.subheader("Portfolio Growth Over Time (Unrealized)")
+            
+            min_transaction_date = st.session_state.transactions["Date"].min()
+            max_today = datetime.now()
+            
+            all_traded_stocks = st.session_state.transactions["Stock"].unique().tolist()
+            all_historical_prices = get_historical_prices(
+                all_traded_stocks, 
+                min_transaction_date.strftime("%Y-%m-%d"), 
+                (max_today + timedelta(days=1)).strftime("%Y-%m-%d")
+            )
+            all_historical_prices.index = all_historical_prices.index.date 
 
-                if action == "Buy":
-                    current_holdings_state_for_history[stock]["quantity"] += quantity
-                    current_holdings_state_for_history[stock]["total_cost"] += quantity * price
-                elif action == "Sell":
-                    if current_holdings_state_for_history[stock]["quantity"] > 0:
-                        cost_per_share_before_sell = current_holdings_state_for_history[stock]["total_cost"] / current_holdings_state_for_history[stock]["quantity"]
-                        current_holdings_state_for_history[stock]["quantity"] -= quantity
-                        current_holdings_state_for_history[stock]["total_cost"] -= quantity * cost_per_share_before_sell
+            portfolio_history_data = []
+            
+            current_holdings_state_for_history = collections.defaultdict(lambda: {"quantity": 0, "total_cost": 0})
+
+            all_relevant_dates = sorted(list(set(
+                [t.date() for t in st.session_state.transactions["Date"]] + 
+                pd.date_range(start=min_transaction_date, end=max_today, freq='D').date.tolist()
+            )))
+
+            transaction_idx_for_history = 0
+            for current_day in all_relevant_dates:
+                while transaction_idx_for_history < len(st.session_state.transactions) and \
+                      st.session_state.transactions.iloc[transaction_idx_for_history]["Date"].date() <= current_day:
                     
-                    if current_holdings_state_for_history[stock]["quantity"] <= 0:
-                        current_holdings_state_for_history.pop(stock, None) 
-                    elif current_holdings_state_for_history[stock]["total_cost"] < 0: 
-                        current_holdings_state_for_history[stock]["total_cost"] = 0
-                
-                transaction_idx_for_history += 1
+                    txn = st.session_state.transactions.iloc[transaction_idx_for_history]
+                    stock = txn["Stock"]
+                    action = txn["Action"]
+                    quantity = txn["Quantity"]
+                    price = txn["Price"]
 
-            total_invested_day = 0
-            current_value_day = 0
-
-            for stock, data in current_holdings_state_for_history.items():
-                qty = data["quantity"]
-                total_cost_for_stock = data["total_cost"]
-
-                if qty > 0:
-                    total_invested_day += total_cost_for_stock
+                    if action == "Buy":
+                        current_holdings_state_for_history[stock]["quantity"] += quantity
+                        current_holdings_state_for_history[stock]["total_cost"] += quantity * price
+                    elif action == "Sell":
+                        if current_holdings_state_for_history[stock]["quantity"] > 0:
+                            cost_per_share_before_sell = current_holdings_state_for_history[stock]["total_cost"] / current_holdings_state_for_history[stock]["quantity"]
+                            current_holdings_state_for_history[stock]["quantity"] -= quantity
+                            current_holdings_state_for_history[stock]["total_cost"] -= quantity * cost_per_share_before_sell
+                        
+                        if current_holdings_state_for_history[stock]["quantity"] <= 0:
+                            current_holdings_state_for_history.pop(stock, None) 
+                        elif current_holdings_state_for_history[stock]["total_cost"] < 0: 
+                            current_holdings_state_for_history[stock]["total_cost"] = 0
                     
-                    hist_price = all_historical_prices.loc[current_day, stock] if current_day in all_historical_prices.index and stock in all_historical_prices.columns else None
-                    
-                    if pd.isna(hist_price) or hist_price is None:
-                        if stock in all_historical_prices.columns:
-                            valid_prices = all_historical_prices[stock].dropna()
-                            if not valid_prices.empty:
-                                relevant_prices = valid_prices[valid_prices.index <= current_day]
-                                hist_price = relevant_prices.iloc[-1] if not relevant_prices.empty else 0
+                    transaction_idx_for_history += 1
+
+                total_invested_day = 0
+                current_value_day = 0
+
+                for stock, data in current_holdings_state_for_history.items():
+                    qty = data["quantity"]
+                    total_cost_for_stock = data["total_cost"]
+
+                    if qty > 0:
+                        total_invested_day += total_cost_for_stock
+                        
+                        hist_price = all_historical_prices.loc[current_day, stock] if current_day in all_historical_prices.index and stock in all_historical_prices.columns else None
+                        
+                        if pd.isna(hist_price) or hist_price is None:
+                            if stock in all_historical_prices.columns:
+                                valid_prices = all_historical_prices[stock].dropna()
+                                if not valid_prices.empty:
+                                    relevant_prices = valid_prices[valid_prices.index <= current_day]
+                                    hist_price = relevant_prices.iloc[-1] if not relevant_prices.empty else 0
+                                else:
+                                    hist_price = 0 
                             else:
                                 hist_price = 0 
-                        else:
-                            hist_price = 0 
-                            
-                    current_value_day += qty * hist_price
+                                
+                        current_value_day += qty * hist_price
+                
+                portfolio_history_data.append({
+                    "Date": current_day,
+                    "Total Invested": total_invested_day,
+                    "Current Value": current_value_day
+                })
             
-            portfolio_history_data.append({
-                "Date": current_day,
-                "Total Invested": total_invested_day,
-                "Current Value": current_value_day
-            })
+            if portfolio_history_data:
+                history_df = pd.DataFrame(portfolio_history_data)
+                history_df["Date"] = pd.to_datetime(history_df["Date"])
+                
+                fig = px.line(
+                    history_df, 
+                    x="Date", 
+                    y=["Total Invested", "Current Value"],
+                    title="Investment Value vs. Current Portfolio Value Over Time",
+                    labels={"value": "Amount (₹)", "variable": "Metric"},
+                    color_discrete_map={
+                        "Total Invested": "#636EFA",
+                        "Current Value": "#00CC96"
+                    }
+                )
+                fig.update_layout(hovermode="x unified")
+                st.plotly_chart(fig, use_container_width=True)
+            else:
+                st.info("Not enough data to plot portfolio growth. Add more transactions.")
+    else: # This else belongs to "if not st.session_state.transactions.empty"
+        st.info("No transactions added yet. Use the sidebar to input trades and see your portfolio performance.")
+
+
+with tab2: # Content for the "Transactions" tab
+    st.subheader("Your Transactions") 
+    if not st.session_state.transactions.empty:
+        editable_transactions_df = st.session_state.transactions.sort_values(by="Date", ascending=False).reset_index(drop=True)
         
-        if portfolio_history_data:
-            history_df = pd.DataFrame(portfolio_history_data)
-            history_df["Date"] = pd.to_datetime(history_df["Date"])
-            
-            fig = px.line(
-                history_df, 
-                x="Date", 
-                y=["Total Invested", "Current Value"],
-                title="Investment Value vs. Current Portfolio Value Over Time",
-                labels={"value": "Amount (₹)", "variable": "Metric"},
-                color_discrete_map={
-                    "Total Invested": "#636EFA",
-                    "Current Value": "#00CC96"
-                }
-            )
-            fig.update_layout(hovermode="x unified")
-            st.plotly_chart(fig, use_container_width=True)
-        else:
-            st.info("Not enough data to plot portfolio growth. Add more transactions.")
+        edited_df = st.data_editor(
+            editable_transactions_df, 
+            use_container_width=True,
+            num_rows="dynamic", 
+            column_config={
+                "Date": st.column_config.DateColumn(format="YYYY-MM-DD"), 
+                "Quantity": st.column_config.NumberColumn(format="%d"),
+                "Price": st.column_config.NumberColumn(format="₹%,.2f")
+            },
+            key="transactions_data_editor_bottom" # Unique key for the widget
+        )
+
+        if not edited_df.equals(editable_transactions_df):
+            try:
+                edited_df["Date"] = pd.to_datetime(edited_df["Date"])
+
+                for index, row in edited_df.iterrows():
+                    symbol_check, symbol_error = validate_indian_stock_symbol(row["Stock"])
+                    if symbol_error:
+                        st.error(f"Error in row {index+1}: {symbol_error}. Please correct the stock symbol.")
+                        st.stop() 
+                    edited_df.loc[index, "Stock"] = symbol_check 
+
+                    if row["Quantity"] < 1:
+                        st.error(f"Error in row {index+1}: Quantity must be at least 1.")
+                        st.stop()
+                    if row["Price"] < 0.01:
+                        st.error(f"Error in row {index+1}: Price must be at least ₹0.01.")
+                        st.stop()
+
+                st.session_state.transactions = edited_df
+                st.success("Transactions updated successfully!")
+                st.cache_data.clear() # Clear all caches if transactions changed
+                st.rerun() 
+            except Exception as e:
+                st.error(f"Error updating transactions: {e}. Please ensure 'Date' is in YYYY-MM-DD format, Quantity is a number, and Price is a number.")
+    else:
+        st.info("No transactions added yet.")
